@@ -32,10 +32,10 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(repo_root))
 
 from src.detection.infer_yolo import extract_crops
+from src.graph.detector_feats import DEFAULT_DET_FEAT_DIM
 from src.utils.dataset import FGVDGraphDataset
 from src.graph.features import feature_dim
-from src.graph.models.sgcn import SGCN
-from src.graph.models.gat import GATClassifier
+from src.graph.model_factory import build_gnn_classifier as build_model
 from src.utils.metrics import compute_metrics, binary_accuracy, print_summary
 
 # Two-wheeler class ids: motorcycle (1), scooter (2)
@@ -79,10 +79,28 @@ def run_pipeline(args):
 
     # ── Stage 2: GNN classification ──────────────────────────────────────
     print(f"\n📐 Stage 2: {args.model.upper()} classification…")
-    test_ds = FGVDGraphDataset(
-        args.crops_out, feature_types, conn,
-        cache_dir="data/processed/graphs/test",
-    )
+    lf = cfg.get("late_fusion") or {}
+    det_dim = int(lf.get("det_feat_dim", DEFAULT_DET_FEAT_DIM)) if lf.get("enabled", False) else 0
+    meta_file = Path(args.crops_out) / "crop_metadata.json"
+    if meta_file.is_file():
+        test_ds = FGVDGraphDataset(
+            args.crops_out,
+            feature_types,
+            conn,
+            cache_dir="data/processed/graphs/test",
+            metadata_json=str(meta_file),
+            det_feat_dim=det_dim,
+            detector_metadata_json=str(meta_file),
+        )
+    else:
+        test_ds = FGVDGraphDataset(
+            args.crops_out,
+            feature_types,
+            conn,
+            cache_dir="data/processed/graphs/test",
+            det_feat_dim=det_dim,
+            detector_metadata_json=None,
+        )
     num_workers = int(cfg.get("num_workers", 0))
     loader = DataLoader(
         test_ds,
@@ -94,13 +112,10 @@ def run_pipeline(args):
     )
 
     in_ch = feature_dim(feature_types)
-    if args.model == "sgcn":
-        model = SGCN(in_ch, num_classes=6, hidden_channels=cfg.get("hidden_channels", 64),
-                     num_layers=cfg.get("num_layers", 3), dropout=0.0)
-    else:
-        model = GATClassifier(in_ch, num_classes=6)
+    eval_cfg = {**cfg, "dropout": 0.0}
+    model = build_model(args.model, in_ch, num_classes=6, cfg=eval_cfg)
 
-    model.load_state_dict(torch.load(args.gnn_weights, map_location="cpu"))
+    model.load_state_dict(torch.load(args.gnn_weights, map_location="cpu"), strict=True)
     model = model.to(args.device).eval()
 
     all_pred, all_true = [], []

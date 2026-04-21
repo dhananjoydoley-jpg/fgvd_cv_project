@@ -26,10 +26,10 @@ if __package__ in {None, ""}:
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
+from src.graph.detector_feats import DEFAULT_DET_FEAT_DIM
+from src.graph.model_factory import build_gnn_classifier as build_model
 from src.utils.dataset import FGVDGraphDataset
 from src.graph.features import feature_dim
-from src.graph.models.sgcn import SGCN
-from src.graph.models.gat import GATClassifier
 from src.utils.metrics import compute_metrics, print_summary
 
 CLASS_NAMES = ["car", "motorcycle", "scooter", "truck", "autorickshaw", "bus"]
@@ -85,23 +85,11 @@ def parse_args():
     return p.parse_args()
 
 
-def build_model(model_name: str, in_channels: int, num_classes: int, cfg: dict):
-    if model_name == "sgcn":
-        return SGCN(
-            in_channels=in_channels,
-            num_classes=num_classes,
-            hidden_channels=cfg.get("hidden_channels", 64),
-            num_layers=cfg.get("num_layers", 3),
-            dropout=cfg.get("dropout", 0.5),
-        )
-    else:  # gat
-        return GATClassifier(
-            in_channels=in_channels,
-            num_classes=num_classes,
-            hidden_channels=cfg.get("hidden_channels", 64),
-            num_layers=cfg.get("num_layers", 3),
-            dropout=cfg.get("dropout", 0.5),
-        )
+def _metadata_path_if_exists(p: str | None) -> str | None:
+    if not p:
+        return None
+    path = Path(p)
+    return str(path) if path.is_file() else None
 
 
 def maybe_subset_dataset(dataset, max_items: int | None, seed: int = 0):
@@ -205,15 +193,38 @@ def train(args):
     conn = 8 if "8" in str(connectivity) else 4
     target_epochs = int(args.epochs) if args.epochs is not None else int(cfg["epochs"])
 
+    lf_cfg = cfg.get("late_fusion") or {}
+    det_dim = int(lf_cfg.get("det_feat_dim", DEFAULT_DET_FEAT_DIM)) if lf_cfg.get("enabled", False) else 0
+    train_det_json = _metadata_path_if_exists(lf_cfg.get("train_metadata_json"))
+    val_det_json = _metadata_path_if_exists(lf_cfg.get("val_metadata_json"))
+
     # Datasets
-    train_ds = FGVDGraphDataset(args.train_crops, feature_types, conn,
-                                cache_dir=args.cache_dir + "/train")
-    val_ds   = FGVDGraphDataset(args.val_crops,   feature_types, conn,
-                                cache_dir=args.cache_dir + "/val")
+    train_ds = FGVDGraphDataset(
+        args.train_crops,
+        feature_types,
+        conn,
+        cache_dir=args.cache_dir + "/train",
+        det_feat_dim=det_dim,
+        detector_metadata_json=train_det_json,
+    )
+    val_ds = FGVDGraphDataset(
+        args.val_crops,
+        feature_types,
+        conn,
+        cache_dir=args.cache_dir + "/val",
+        det_feat_dim=det_dim,
+        detector_metadata_json=val_det_json,
+    )
 
     train_ds = maybe_subset_dataset(train_ds, args.max_train_samples, seed=0)
     val_ds = maybe_subset_dataset(val_ds, args.max_val_samples, seed=1)
     print(f"[FGVDGraphDataset] using {len(train_ds)} train samples and {len(val_ds)} val samples")
+    if det_dim > 0:
+        print(
+            f"[late_fusion] det_feat_dim={det_dim} | "
+            f"train_metadata={'ok' if train_det_json else 'MISSING → zero det feats'} | "
+            f"val_metadata={'ok' if val_det_json else 'MISSING → zero det feats'}"
+        )
 
     num_workers = int(cfg.get("num_workers", 0))
     accumulation_steps = max(1, int(cfg.get("accumulation_steps", 1)))

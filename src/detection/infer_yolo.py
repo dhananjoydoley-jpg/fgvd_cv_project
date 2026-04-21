@@ -74,13 +74,13 @@ def extract_crops(weights: str, source: str, out_dir: str,
             verbose=False,
         )[0]
 
+        h, w = img.shape[:2]
         for i, box in enumerate(results.boxes):
             cls_id = int(box.cls.item())
             confidence = float(box.conf.item())
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
 
             # Clamp to image bounds
-            h, w = img.shape[:2]
             x1, y1 = max(0, x1), max(0, y1)
             x2, y2 = min(w, x2), min(h, y2)
 
@@ -103,6 +103,8 @@ def extract_crops(weights: str, source: str, out_dir: str,
                 "class_name": cls_name,
                 "confidence": confidence,
                 "bbox_xyxy": [x1, y1, x2, y2],
+                "image_height": h,
+                "image_width": w,
             })
 
     meta_file = out_path / "crop_metadata.json"

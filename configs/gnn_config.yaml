@@ -32,7 +32,16 @@ lr: 0.001
 optimizer: adam
 weight_decay: 0.0
 
+# Late fusion (YOLO box + confidence + one-hot cls) with pooled graph embedding — see src/graph/detector_feats.py
+# For training with real vectors, generate crop_metadata.json via infer_yolo on train/val image roots.
+late_fusion:
+  enabled: true
+  det_feat_dim: 9          # log rel area, log aspect, conf, + 6 one-hot YOLO classes
+  fusion_hidden: 64
+  train_metadata_json: data/processed/crops/train/crop_metadata.json
+  val_metadata_json: data/processed/crops/val/crop_metadata.json
+
 # Output
 project: runs/gnn
-name: fgvd_sgcn
+name: fgvd_sgcn_fusion
 save_best: true

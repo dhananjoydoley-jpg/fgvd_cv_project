@@ -13,6 +13,7 @@ import torch
 from torch.utils.data import Dataset
 from torch_geometric.data import Data
 
+from src.graph.detector_feats import DEFAULT_DET_FEAT_DIM, build_crop_path_to_det_feat
 from src.graph.features import extract_features
 from src.graph.graph_builder import build_grid_graph_fast
 
@@ -35,6 +36,9 @@ class FGVDGraphDataset(Dataset):
         connectivity : 4 or 8 for grid graph neighbourhood.
         cache_dir    : if provided, save/load pre-built .pt graph files here.
         metadata_json: if provided, use this file instead of scanning root.
+        det_feat_dim: if >0, attach data.det_feat [1,D] for late fusion (zeros if no metadata).
+        detector_metadata_json: JSON with bbox/conf/class per crop (infer_yolo format). If None
+            but metadata_json is set, reuse that file for detector features.
     """
 
     def __init__(
@@ -44,11 +48,15 @@ class FGVDGraphDataset(Dataset):
         connectivity: int = 8,
         cache_dir: str | None = None,
         metadata_json: str | None = None,
+        det_feat_dim: int = 0,
+        detector_metadata_json: str | None = None,
     ):
         self.root = Path(root)
         self.feature_types = list(feature_types)
         self.connectivity = connectivity
         self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.det_feat_dim = int(det_feat_dim)
+        self._det_by_path: dict[str, torch.Tensor] = {}
 
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -72,6 +80,22 @@ class FGVDGraphDataset(Dataset):
                 for img_file in cls_dir.glob("*.jpg"):
                     self.samples.append((img_file, cls_idx))
 
+        if self.det_feat_dim > 0:
+            meta_for_det = detector_metadata_json or metadata_json
+            if meta_for_det and Path(meta_for_det).is_file():
+                with open(meta_for_det) as f:
+                    det_meta = json.load(f)
+                self._det_by_path = build_crop_path_to_det_feat(det_meta)
+                print(
+                    f"[FGVDGraphDataset] late fusion: {len(self._det_by_path)} detector vectors "
+                    f"from {meta_for_det}"
+                )
+            else:
+                print(
+                    "[FGVDGraphDataset] late fusion: no detector metadata file — "
+                    "using zero detector features (run infer_yolo on crops to generate JSON)."
+                )
+
         print(f"[FGVDGraphDataset] {len(self.samples)} samples from {root}")
 
     def __len__(self):
@@ -86,9 +110,11 @@ class FGVDGraphDataset(Dataset):
             cache_file = self.cache_dir / cache_key
             if cache_file.exists():
                 try:
-                    return torch.load(cache_file, weights_only=False, map_location="cpu")
+                    graph = torch.load(cache_file, weights_only=False, map_location="cpu")
                 except TypeError:
-                    return torch.load(cache_file, map_location="cpu")
+                    graph = torch.load(cache_file, map_location="cpu")
+                self._attach_det_feat(graph, img_path)
+                return graph
 
         # Load and build graph
         img = cv2.imread(str(img_path))
@@ -100,4 +126,18 @@ class FGVDGraphDataset(Dataset):
         if self.cache_dir:
             torch.save(graph, cache_file)
 
+        self._attach_det_feat(graph, img_path)
         return graph
+
+    def _attach_det_feat(self, graph: Data, img_path: Path) -> None:
+        if self.det_feat_dim <= 0:
+            return
+        dim = self.det_feat_dim
+        key = str(img_path.resolve())
+        if key in self._det_by_path:
+            vec = self._det_by_path[key]
+        else:
+            vec = torch.zeros(1, dim, dtype=torch.float32)
+        if vec.size(-1) != dim:
+            raise ValueError(f"det_feat dim mismatch: got {vec.size(-1)}, expected {dim}")
+        graph.det_feat = vec.clone()

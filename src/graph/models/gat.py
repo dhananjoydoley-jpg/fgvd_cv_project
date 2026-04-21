@@ -17,6 +17,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATConv, global_mean_pool
 
+from src.graph.late_fusion import LateFusionMLP
+
 
 class GATClassifier(nn.Module):
     def __init__(
@@ -27,9 +29,12 @@ class GATClassifier(nn.Module):
         num_layers: int = 3,
         heads: int = 4,
         dropout: float = 0.5,
+        det_feat_dim: int = 0,
+        fusion_hidden: int = 64,
     ):
         super().__init__()
         self.dropout = dropout
+        self.det_feat_dim = int(det_feat_dim)
 
         self.convs = nn.ModuleList()
         for i in range(num_layers):
@@ -44,7 +49,18 @@ class GATClassifier(nn.Module):
                     GATConv(in_ch, hidden_channels, heads=heads, concat=True, dropout=dropout)
                 )
 
-        self.classifier = nn.Linear(hidden_channels, num_classes)
+        if self.det_feat_dim > 0:
+            self.fusion = LateFusionMLP(
+                graph_dim=hidden_channels,
+                det_dim=self.det_feat_dim,
+                num_classes=num_classes,
+                hidden=fusion_hidden,
+                dropout=dropout,
+            )
+            self.classifier = None
+        else:
+            self.fusion = None
+            self.classifier = nn.Linear(hidden_channels, num_classes)
 
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
@@ -57,4 +73,7 @@ class GATClassifier(nn.Module):
             x = F.dropout(x, p=self.dropout, training=self.training)
 
         x = global_mean_pool(x, batch)
+        det_feat = getattr(data, "det_feat", None)
+        if self.det_feat_dim > 0 and self.fusion is not None:
+            return self.fusion(x, det_feat)
         return self.classifier(x)

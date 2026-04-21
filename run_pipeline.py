@@ -13,18 +13,19 @@ Usage:
 
 import argparse
 import json
-import tempfile
 from pathlib import Path
 
 import cv2
-import torch
 import numpy as np
+import torch
+import yaml
 from ultralytics import YOLO
 from torch_geometric.data import Batch
 
+from src.graph.detector_feats import detector_feat_tensor
 from src.graph.features import extract_features, feature_dim
 from src.graph.graph_builder import build_grid_graph_fast
-from src.graph.models.sgcn import SGCN
+from src.graph.model_factory import build_gnn_classifier as build_model
 from src.utils.dataset import CLASS_NAMES
 
 CROP_SIZE = 64
@@ -40,6 +41,7 @@ def parse_args():
     p.add_argument("--yolo_weights", required=True)
     p.add_argument("--gnn_weights",  required=True)
     p.add_argument("--source",       required=True)
+    p.add_argument("--config",       default="configs/gnn_config.yaml", help="GNN config (late_fusion must match checkpoint)")
     p.add_argument("--features",     nargs="+", default=DEFAULT_FEATURES)
     p.add_argument("--gnn_batch_size", type=int, default=16)
     p.add_argument("--save_vis",     action="store_true")
@@ -49,27 +51,47 @@ def parse_args():
     return p.parse_args()
 
 
-def load_gnn(weights: str, feature_types: list[str], device: str) -> SGCN:
+def load_gnn(weights: str, feature_types: list[str], device: str, config_path: str):
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
     in_ch = feature_dim(feature_types)
-    model = SGCN(in_ch, num_classes=len(CLASS_NAMES), dropout=0.0)
-    model.load_state_dict(torch.load(weights, map_location="cpu"))
+    eval_cfg = {**cfg, "dropout": 0.0}
+    model = build_model("sgcn", in_ch, num_classes=len(CLASS_NAMES), cfg=eval_cfg)
+    model.load_state_dict(torch.load(weights, map_location="cpu"), strict=True)
     return model.to(device).eval()
 
 
-def classify_crops(crops: list[np.ndarray], feature_types: list[str],
-                   model: SGCN, device: str, batch_size: int = 16) -> list[int]:
-    """Convert a list of BGR crops to graph batch and run GNN."""
-    predictions = []
+def classify_crops(
+    crops: list[np.ndarray],
+    det_infos: list[dict],
+    feature_types: list[str],
+    model,
+    device: str,
+    batch_size: int = 16,
+) -> list[int]:
+    """Build graphs + optional detector vectors, batch-infer with SGCN (+ late fusion)."""
+    predictions: list[tuple[int, float]] = []
     for start in range(0, len(crops), batch_size):
         graphs = []
-        for crop in crops[start:start + batch_size]:
+        for crop, dinfo in zip(crops[start:start + batch_size], det_infos[start:start + batch_size]):
             feat = extract_features(crop, feature_types)
-            graphs.append(build_grid_graph_fast(feat, connectivity=8))
+            g = build_grid_graph_fast(feat, connectivity=8)
+            g.det_feat = detector_feat_tensor(
+                dinfo["bbox_xyxy"],
+                dinfo["image_hw"],
+                dinfo["confidence"],
+                dinfo["yolo_cls_id"],
+            )
+            graphs.append(g)
 
         batch = Batch.from_data_list(graphs).to(device)
         with torch.inference_mode():
             logits = model(batch)
-        predictions.extend(logits.argmax(1).cpu().tolist())
+        probs = torch.softmax(logits, dim=1)
+        pred_ids = logits.argmax(1)
+        for i in range(pred_ids.shape[0]):
+            pid = int(pred_ids[i].item())
+            predictions.append((pid, float(probs[i, pid].item())))
 
     return predictions
 
@@ -79,7 +101,7 @@ def run(args):
     out_path.mkdir(parents=True, exist_ok=True)
 
     detector = YOLO(args.yolo_weights)
-    classifier = load_gnn(args.gnn_weights, args.features, args.device)
+    classifier = load_gnn(args.gnn_weights, args.features, args.device, args.config)
 
     source = Path(args.source).expanduser()
     if not source.exists():
@@ -106,7 +128,8 @@ def run(args):
 
         det_results = detector.predict(str(img_path), conf=args.conf, verbose=False)[0]
 
-        crops, boxes, confs = [], [], []
+        crops, boxes, confs, det_infos = [], [], [], []
+        ih, iw = img.shape[0], img.shape[1]
         for box in det_results.boxes:
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
             x1, y1 = max(0, x1), max(0, y1)
@@ -117,19 +140,35 @@ def run(args):
             crops.append(cv2.resize(crop, (CROP_SIZE, CROP_SIZE)))
             boxes.append([x1, y1, x2, y2])
             confs.append(float(box.conf.item()))
+            det_infos.append({
+                "bbox_xyxy": [x1, y1, x2, y2],
+                "image_hw": (ih, iw),
+                "confidence": float(box.conf.item()),
+                "yolo_cls_id": int(box.cls.item()),
+            })
 
         if not crops:
             continue
 
-        class_ids = classify_crops(crops, args.features, classifier, args.device, batch_size=args.gnn_batch_size)
+        id_and_gnn_conf = classify_crops(
+            crops,
+            det_infos,
+            args.features,
+            classifier,
+            args.device,
+            batch_size=args.gnn_batch_size,
+        )
 
         img_results = []
-        for (x1, y1, x2, y2), cls_id, conf in zip(boxes, class_ids, confs):
+        for (x1, y1, x2, y2), (cls_id, gnn_conf), det_conf in zip(
+            boxes, id_and_gnn_conf, confs
+        ):
             img_results.append({
                 "bbox": [x1, y1, x2, y2],
                 "class_id": cls_id,
                 "class_name": CLASS_NAMES[cls_id],
-                "det_conf": conf,
+                "det_conf": det_conf,
+                "gnn_conf": gnn_conf,
             })
 
         all_results.append({"image": str(img_path), "detections": img_results})
@@ -140,7 +179,11 @@ def run(args):
                 x1, y1, x2, y2 = det["bbox"]
                 color = PALETTE[det["class_id"] % len(PALETTE)]
                 cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
-                label = f"{det['class_name']} {det['det_conf']:.2f}"
+                # det_conf = YOLO "this box is an object" score, not accuracy.
+                # gnn_conf = softmax probability for the displayed fine-grained class.
+                label = (
+                    f"{det['class_name']} gnn:{det['gnn_conf']:.2f} det:{det['det_conf']:.2f}"
+                )
                 cv2.putText(vis, label, (x1, max(y1 - 6, 12)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
             cv2.imwrite(str(out_path / img_path.name), vis)

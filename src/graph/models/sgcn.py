@@ -16,7 +16,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import MessagePassing
+from torch_geometric.nn import global_mean_pool
 from torch_geometric.utils import add_self_loops, degree
+
+from src.graph.late_fusion import LateFusionMLP
 
 
 class SGCNConv(MessagePassing):
@@ -77,16 +80,30 @@ class SGCN(nn.Module):
         hidden_channels: int = 64,
         num_layers: int = 3,
         dropout: float = 0.5,
+        det_feat_dim: int = 0,
+        fusion_hidden: int = 64,
     ):
         super().__init__()
         self.dropout = dropout
+        self.det_feat_dim = int(det_feat_dim)
 
         self.convs = nn.ModuleList()
         for i in range(num_layers):
             in_ch = in_channels if i == 0 else hidden_channels
             self.convs.append(SGCNConv(in_ch, hidden_channels))
 
-        self.classifier = nn.Linear(hidden_channels, num_classes)
+        if self.det_feat_dim > 0:
+            self.fusion = LateFusionMLP(
+                graph_dim=hidden_channels,
+                det_dim=self.det_feat_dim,
+                num_classes=num_classes,
+                hidden=fusion_hidden,
+                dropout=dropout,
+            )
+            self.classifier = None
+        else:
+            self.fusion = None
+            self.classifier = nn.Linear(hidden_channels, num_classes)
 
     def forward(self, data):
         x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
@@ -98,8 +115,9 @@ class SGCN(nn.Module):
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
 
-        # Global mean pooling over nodes in each graph
-        from torch_geometric.nn import global_mean_pool
         x = global_mean_pool(x, batch)
 
+        det_feat = getattr(data, "det_feat", None)
+        if self.det_feat_dim > 0 and self.fusion is not None:
+            return self.fusion(x, det_feat)
         return self.classifier(x)

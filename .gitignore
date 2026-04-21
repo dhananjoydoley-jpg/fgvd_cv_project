@@ -19,6 +19,7 @@ Thumbs.db
 runs/
 data/processed/
 data/raw/
+data.zip
 
 # Weights & exports (large — use Git LFS or release assets if you need them in GitHub)
 *.pt
