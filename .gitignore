@@ -1,0 +1,33 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ML / this project (large or reproducible)
+runs/
+data/processed/
+data/raw/
+
+# Weights & exports (large — use Git LFS or release assets if you need them in GitHub)
+*.pt
+*.onnx
+*.engine
+*.trt
+
+# IDE / backups
+.idea/
+.vscode/
+*.swp
+*~

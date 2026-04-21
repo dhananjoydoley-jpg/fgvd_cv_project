@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------------
+# Install order (avoids torch-scatter build errors):
+#   1) PyTorch first — GPU example (CUDA 12.x):
+#        pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#      CPU-only:
+#        pip install torch torchvision
+#   2) Then everything else:
+#        pip install -r requirements.txt
+#
+# Optional: prebuilt PyG kernels (faster; must match your torch+CUDA build).
+#   See https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html
+#   Example after torch 2.6+cu124 is installed:
+#        pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.6.0+cu124.html
+# ---------------------------------------------------------------------------
+
+ultralytics>=8.0.0        # YOLOv8 (replaces YOLOv7-tiny)
+torch>=2.0.0
+torchvision>=0.15.0
+torch-geometric>=2.4.0  # PyG for SGCN/GAT (torch-scatter/sparse optional; see header)
+
+opencv-python>=4.8.0
+numpy>=1.24.0
+scikit-learn>=1.3.0     # sklearn.metrics in src/utils/metrics.py
+scikit-image>=0.21.0    # Gabor filters
+Pillow>=10.0.0
+
+pyyaml>=6.0
+tqdm>=4.65.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+pandas>=2.0.0
+
+# Optional: ONNX export
+onnx>=1.14.0
+onnxruntime>=1.15.0

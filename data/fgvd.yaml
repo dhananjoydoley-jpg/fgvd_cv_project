@@ -1,0 +1,15 @@
+# fgvd.yaml — YOLOv8 dataset configuration for FGVD
+path: data/raw           # root dir (relative to project root)
+train: images/train
+val:   images/val
+test:  images/test
+
+# L-1 vehicle classes (6 top-level classes)
+nc: 6
+names:
+  0: car
+  1: motorcycle
+  2: scooter
+  3: truck
+  4: autorickshaw
+  5: bus
